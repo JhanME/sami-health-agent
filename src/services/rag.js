@@ -1,17 +1,18 @@
-const { OpenAI } = require('openai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const pool = require('../db/pool');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const embeddingModel = genAI.getGenerativeModel({ model: 'gemini-embedding-001' });
 
 /**
- * Generate an embedding vector for a given text
+ * Generate an embedding vector for a given text (768 dimensions)
  */
 async function getEmbedding(text) {
-  const res = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: text,
+  const res = await embeddingModel.embedContent({
+    content: { parts: [{ text }] },
+    outputDimensionality: 768,
   });
-  return res.data[0].embedding;
+  return res.embedding.values;
 }
 
 /**

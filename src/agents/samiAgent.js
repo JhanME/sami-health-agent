@@ -1,10 +1,10 @@
 require('dotenv').config();
-const Anthropic = require('@anthropic-ai/sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const pool = require('../db/pool');
 const { retrieveContext } = require('../services/rag');
 const { classifyRisk, isForbiddenTopic, saveAlert } = require('../services/riskClassifier');
 
-const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const FORBIDDEN_REPLY =
   'Esa pregunta es muy importante y debe responderla tu médico directamente. ' +
@@ -16,22 +16,29 @@ const HIGH_RISK_REPLY =
   'Por favor comunícate ahora con tu red de apoyo o llama a la Línea de Salud Mental: *113 opción 5*. ' +
   'También voy a notificar a tu equipo de atención.';
 
+const INACTIVE_REPLY =
+  'Este servicio está disponible solo para pacientes activos. ' +
+  'Comunícate con tu clínica para más información.';
+
 /**
- * Get or create a patient by phone number
+ * Normalize phone to E.164 format (+XXXXXXXXXXX)
  */
-async function getOrCreatePatient(phone) {
-  const existing = await pool.query(
+function normalizePhone(phone) {
+  const digits = phone.replace(/\D/g, '');
+  return digits.startsWith('+') ? phone : `+${digits}`;
+}
+
+/**
+ * Find a patient by phone — returns null if not registered
+ */
+async function getPatient(rawPhone) {
+  const phone = normalizePhone(rawPhone);
+  console.log(`🔍 Looking up patient: ${phone} (raw: ${rawPhone})`);
+  const { rows } = await pool.query(
     'SELECT * FROM patients WHERE phone = $1',
     [phone]
   );
-  if (existing.rows.length > 0) return existing.rows[0];
-
-  // New patient — create with minimal data
-  const created = await pool.query(
-    `INSERT INTO patients (phone) VALUES ($1) RETURNING *`,
-    [phone]
-  );
-  return created.rows[0];
+  return rows[0] || null;
 }
 
 /**
@@ -67,11 +74,25 @@ function buildSystemPrompt(patient, ragChunks) {
     : 'No hay información adicional disponible aún.';
 
   return `
-Eres Sami, un asistente de acompañamiento post-atención médica especializado en pacientes oncológicos.
-Tu tono es empático, cálido, claro y nunca alarmista.
-Respondes en español. Tus respuestas son concisas (máximo 3 párrafos cortos).
+Eres Eva. Acompañas a pacientes oncológicos por WhatsApp durante su tratamiento.
+No eres un bot ni un manual médico — eres una persona cercana, cálida, que escucha y responde como lo haría una amiga con conocimiento clínico.
 
-DATOS DEL PACIENTE:
+CÓMO HABLAS:
+- Escribe como si mandaras un WhatsApp, no como si redactaras un informe.
+- Oraciones cortas. Lenguaje simple. Nada de tecnicismos innecesarios.
+- Antes de responder, reconoce lo que el paciente siente con una frase breve y genuina. Ejemplos: "Eso suena agotador.", "Entiendo que da miedo.", "Qué bueno que me lo cuentas."
+- Usa conectores naturales para arrancar: "Mira,", "Te cuento,", "Sí,", "Claro,", "Lo que pasa es que..."
+- A veces termina con una pregunta corta para mantener el hilo: "¿Cómo te has sentido hoy?", "¿Pudiste descansar?"
+- Varía la estructura. No todas las respuestas tienen que verses igual.
+- Máximo 3 párrafos cortos. Cada párrafo = una idea.
+- Usa emojis con moderación: máximo 2 por respuesta, solo cuando refuercen el mensaje. Útiles: 💙 (apoyo), 🌿 (bienestar), ✅ (confirmación), ⚠️ (alerta leve). Nunca uses emojis en respuestas sobre temas graves o de riesgo.
+
+PROHIBIDO:
+- Empezar con "Hola", saludos o el nombre del paciente al inicio.
+- Sonar como un FAQ, un prospecto médico o una lista de puntos.
+- Usar el nombre del paciente más de una vez por respuesta.
+
+PACIENTE:
 - Nombre: ${patient.name || 'Paciente'}
 - Diagnóstico: ${patient.diagnosis || 'No registrado aún'}
 - Tratamiento: ${patient.treatment_plan || 'No registrado aún'}
@@ -80,9 +101,9 @@ DATOS DEL PACIENTE:
 INFORMACIÓN VERIFICADA (úsala como única fuente):
 ${context}
 
-REGLAS CRÍTICAS — NUNCA LAS ROMPAS:
+REGLAS CLÍNICAS — NUNCA LAS ROMPAS:
 1. Responde SOLO con información del contexto verificado de arriba.
-2. Si no tienes información suficiente, di: "No tengo esa información. Te recomiendo consultarlo directamente con tu médico."
+2. Si no tienes información suficiente, di: "Eso mejor consúltalo directamente con tu médico, él tiene el cuadro completo."
 3. NUNCA inventes dosis, diagnósticos, pronósticos ni datos médicos.
 4. NUNCA contradigas el plan de tratamiento registrado.
 5. Ante cualquier emergencia o crisis emocional, prioriza remitir a recursos de apoyo.
@@ -93,18 +114,37 @@ REGLAS CRÍTICAS — NUNCA LAS ROMPAS:
  * Main entry point — called from the webhook
  */
 async function handleIncomingMessage(phone, userMessage) {
-  // 1. Get or create patient
-  const patient = await getOrCreatePatient(phone);
+  // 1. Find patient — reject if not registered or not activated
+  const patient = await getPatient(phone);
+  if (!patient) {
+    console.log(`⛔ Unregistered number: ${phone}`);
+    return INACTIVE_REPLY;
+  }
+  if (!patient.activated_at) {
+    console.log(`👋 First contact — activating patient: ${phone}`);
+    const welcome =
+      `Hola ${patient.name || ''}👋, soy Eva, tu asistente de acompañamiento oncológico. ` +
+      `Estoy aquí para apoyarte durante tu tratamiento. ` +
+      `Puedes preguntarme sobre tus medicamentos, citas, cuidados en casa o simplemente contarme cómo te sientes. ` +
+      `¿En qué puedo ayudarte hoy?`;
+    await pool.query(
+      'UPDATE patients SET activated_at = NOW() WHERE id = $1',
+      [patient.id]
+    );
+    await saveMessage(patient.id, 'user', userMessage);
+    await saveMessage(patient.id, 'assistant', welcome);
+    return welcome;
+  }
 
-  // 2. Check forbidden topics first (no LLM call needed)
-  if (isForbiddenTopic(userMessage)) {
+  // 2. Check forbidden topics first (no main LLM call needed)
+  if (await isForbiddenTopic(userMessage)) {
     await saveMessage(patient.id, 'user', userMessage);
     await saveMessage(patient.id, 'assistant', FORBIDDEN_REPLY);
     return FORBIDDEN_REPLY;
   }
 
-  // 3. Classify risk before calling Claude
-  const riskLevel = classifyRisk(userMessage);
+  // 3. Classify risk before calling Gemini Pro
+  const riskLevel = await classifyRisk(userMessage);
 
   if (riskLevel === 'high') {
     await saveMessage(patient.id, 'user', userMessage);
@@ -123,19 +163,27 @@ async function handleIncomingMessage(phone, userMessage) {
   // 5. Build conversation history
   const history = await getHistory(patient.id);
 
-  // 6. Call Claude
-  const response = await claude.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 500,
-    temperature: 0.2,
-    system: buildSystemPrompt(patient, ragChunks),
-    messages: [
-      ...history,
-      { role: 'user', content: userMessage },
-    ],
+  // 6. Call Gemini
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.5-pro',
+    systemInstruction: buildSystemPrompt(patient, ragChunks),
+    generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
   });
 
-  const reply = response.content[0].text;
+  // Gemini requires history to start with 'user' — drop any leading assistant messages
+  const firstUserIdx = history.findIndex((m) => m.role === 'user');
+  const validHistory = firstUserIdx > 0 ? history.slice(firstUserIdx) : history;
+
+  const chat = model.startChat({
+    history: validHistory.map((msg) => ({
+      role: msg.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: msg.content }],
+    })),
+  });
+
+  const result = await chat.sendMessage(userMessage);
+  console.log('Gemini raw response:', JSON.stringify(result.response.candidates?.[0], null, 2));
+  const reply = result.response.text();
 
   // 7. Save both messages
   await saveMessage(patient.id, 'user', userMessage);

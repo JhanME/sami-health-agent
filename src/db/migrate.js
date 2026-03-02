@@ -14,6 +14,7 @@ async function migrate() {
       CREATE TABLE IF NOT EXISTS patients (
         id SERIAL PRIMARY KEY,
         phone TEXT UNIQUE NOT NULL,         -- WhatsApp number (from Kapso)
+        dni TEXT UNIQUE,                    -- Documento Nacional de Identidad
         name TEXT,
         diagnosis TEXT,                     -- e.g. "Cáncer de mama estadio II"
         treatment_plan TEXT,
@@ -59,7 +60,7 @@ async function migrate() {
         patient_id INT REFERENCES patients(id) ON DELETE CASCADE,  -- NULL = global
         source TEXT NOT NULL,             -- ficha_clinica | guia_oms | protocolo_psico | nutricion
         content TEXT NOT NULL,
-        embedding vector(1536),
+        embedding vector(768),
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
@@ -82,6 +83,16 @@ async function migrate() {
         reminded BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT NOW()
       )
+    `);
+
+    // Add dni column if it doesn't exist (for existing databases)
+    await client.query(`
+      ALTER TABLE patients ADD COLUMN IF NOT EXISTS dni TEXT UNIQUE
+    `);
+
+    // Add activated_at column if it doesn't exist
+    await client.query(`
+      ALTER TABLE patients ADD COLUMN IF NOT EXISTS activated_at TIMESTAMP
     `);
 
     await client.query('COMMIT');
