@@ -120,10 +120,9 @@ src/
 | `OPENAI_API_KEY` | OpenAI API key (for embeddings) |
 | `KAPSO_API_KEY` | Kapso.ai API key |
 | `KAPSO_WEBHOOK_SECRET` | Webhook signature secret |
-| `PORT` | Server port (default: 3000) |
 
 ---
 
 ##  License
 
-MIT
+MIT 
