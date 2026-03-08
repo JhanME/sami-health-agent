@@ -51,6 +51,7 @@ function buildFichaClinica(patient) {
     `Diagnóstico: ${patient.diagnosis || 'no especificado'}`,
     `Plan de tratamiento: ${patient.treatment_plan || 'no especificado'}`,
     `Oncólogo: ${patient.oncologist || 'no especificado'}`,
+    `Teléfono oncólogo: ${patient.oncologist_phone || 'no registrado'}`,
     `Plan nutricional: ${patient.nutrition_plan || 'no especificado'}`,
     `Próxima cita registrada: ${patient.next_appointment || 'no agendada'}`,
     `Medicamentos: ${medsText}`,
@@ -132,7 +133,7 @@ router.get('/patients/:id', async (req, res) => {
 
 router.put('/patients/:id', async (req, res) => {
   const patientId = parseInt(req.params.id);
-  const { name, dni, diagnosis, treatment_plan, oncologist, nutrition_plan, next_appointment, medications, emergency_contacts } = req.body;
+  const { name, dni, diagnosis, treatment_plan, oncologist, oncologist_phone, nutrition_plan, next_appointment, medications, emergency_contacts } = req.body;
   const nextApt = (next_appointment === '' || next_appointment == null) ? null : next_appointment;
   let meds, contacts;
   try {
@@ -146,10 +147,10 @@ router.put('/patients/:id', async (req, res) => {
       `UPDATE patients
        SET name = $1, dni = $2, diagnosis = $3, treatment_plan = $4, oncologist = $5,
            nutrition_plan = $6, next_appointment = $7, medications = $8,
-           emergency_contacts = $9, updated_at = NOW()
-       WHERE id = $10 RETURNING *`,
+           emergency_contacts = $9, oncologist_phone = $10, updated_at = NOW()
+       WHERE id = $11 RETURNING *`,
       [name, dni || null, diagnosis, treatment_plan, oncologist, nutrition_plan, nextApt,
-       JSON.stringify(meds), JSON.stringify(contacts), patientId]
+       JSON.stringify(meds), JSON.stringify(contacts), oncologist_phone || null, patientId]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Patient not found' });
     const patient = rows[0];

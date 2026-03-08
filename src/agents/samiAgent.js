@@ -3,6 +3,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const pool = require('../db/pool');
 const { retrieveContext } = require('../services/rag');
 const { classifyRisk, isForbiddenTopic, saveAlert } = require('../services/riskClassifier');
+const { sendRiskReport } = require('../services/psychReport');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -136,36 +137,39 @@ async function handleIncomingMessage(phone, userMessage) {
     return welcome;
   }
 
-  // 2. Check forbidden topics first (no main LLM call needed)
-  if (await isForbiddenTopic(userMessage)) {
+  // 2-5. Run all independent pre-filters and data fetches in parallel
+  const [isForbidden, riskLevel, ragChunks, history] = await Promise.all([
+    isForbiddenTopic(userMessage),
+    classifyRisk(userMessage),
+    retrieveContext(userMessage, patient.id),
+    getHistory(patient.id),
+  ]);
+
+  if (isForbidden) {
     await saveMessage(patient.id, 'user', userMessage);
     await saveMessage(patient.id, 'assistant', FORBIDDEN_REPLY);
     return FORBIDDEN_REPLY;
   }
 
-  // 3. Classify risk before calling Gemini Pro
-  const riskLevel = await classifyRisk(userMessage);
-
   if (riskLevel === 'high') {
     await saveMessage(patient.id, 'user', userMessage);
     await saveMessage(patient.id, 'assistant', HIGH_RISK_REPLY);
     await saveAlert(patient.id, 'high', userMessage);
+    await sendRiskReport(patient, 'high', userMessage);
     return HIGH_RISK_REPLY;
   }
 
   if (riskLevel === 'moderate') {
+    const wasEscalation = patient.risk_level === 'expected';
     await saveAlert(patient.id, 'moderate', userMessage);
+    if (wasEscalation) {
+      await sendRiskReport(patient, 'moderate', userMessage);
+    }
   }
-
-  // 4. Retrieve RAG context
-  const ragChunks = await retrieveContext(userMessage, patient.id);
-
-  // 5. Build conversation history
-  const history = await getHistory(patient.id);
 
   // 6. Call Gemini
   const model = genAI.getGenerativeModel({
-    model: 'gemini-2.5-pro',
+    model: 'gemini-2.0-flash',
     systemInstruction: buildSystemPrompt(patient, ragChunks),
     generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
   });

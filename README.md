@@ -90,35 +90,6 @@ High-risk events bypass the LLM entirely — a hardcoded, clinically validated r
 | Vector database | PostgreSQL + pgvector |
 | Relational data | PostgreSQL (patients, messages, alerts, appointments) |
 | Dashboard | Next.js (separate repo) |
-| Infrastructure | Railway |
-| Local tunnel | Cloudflare Tunnel |
-
----
-
-##  Getting started
-
-```bash
-# 1. Clone and install
-git clone https://github.com/your-org/sami-health.git
-cd sami-health
-npm install
-
-# 2. Configure environment
-cp .env.example .env
-# Fill in ANTHROPIC_API_KEY, OPENAI_API_KEY, KAPSO_API_KEY, DATABASE_URL
-
-# 3. Run migrations (requires PostgreSQL with pgvector extension)
-npm run db:migrate
-
-# 4. Expose localhost via Cloudflare Tunnel
-cloudflared tunnel --url http://localhost:3000
-# Copy the generated URL → paste in Kapso webhook settings
-
-# 5. Start development server
-npm run dev
-```
-
----
 
 ##  Project structure
 

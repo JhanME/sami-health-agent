@@ -4,7 +4,8 @@
       "Bash(cd:*)",
       "Bash(curl:*)",
       "WebFetch(domain:docs.kapso.ai)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(code:*)"
     ]
   }
 }

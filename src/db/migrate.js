@@ -95,6 +95,11 @@ async function migrate() {
       ALTER TABLE patients ADD COLUMN IF NOT EXISTS activated_at TIMESTAMP
     `);
 
+    // Add oncologist_phone column if it doesn't exist
+    await client.query(`
+      ALTER TABLE patients ADD COLUMN IF NOT EXISTS oncologist_phone TEXT
+    `);
+
     await client.query('COMMIT');
     console.log('✅ Migrations applied successfully');
   } catch (err) {
