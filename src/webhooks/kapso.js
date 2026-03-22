@@ -4,21 +4,22 @@ const { handleIncomingMessage } = require('../agents/samiAgent');
 const { sendMessage, markRead, sendTyping } = require('../services/kapso');
 
 // Per-patient queue: serializes concurrent messages from the same phone number.
-// Each entry is the Promise for the last enqueued task. On completion the entry is
-// removed so the Map doesn't grow unboundedly.
 const queues = new Map();
 
 function enqueue(phone, fn) {
   const prev = queues.get(phone) ?? Promise.resolve();
-  // Chain onto previous task; run fn even if prev rejected
   const current = prev.then(fn, fn);
   queues.set(phone, current.finally(() => {
     if (queues.get(phone) === current) queues.delete(phone);
   }));
 }
 
+// Buffer: groups rapid-fire messages from the same patient before processing.
+// Waits BUFFER_MS after the last message before flushing.
+const BUFFER_MS = 5000;
+const buffers = new Map(); // phone → { messages: [{messageId, text}], timer }
+
 async function processMessage(phone, messageId, text) {
-  await markRead(messageId);
   await sendTyping(messageId);
 
   // Keep typing indicator alive every 3s while processing
@@ -64,7 +65,8 @@ router.post('/', (req, res) => {
 
       console.log(`📩 [${phone}] ${text}`);
 
-      // Fire-and-forget, serialized per patient
+      // Buffer disabled — process each message immediately
+      markRead(messageId);
       enqueue(phone, () => processMessage(phone, messageId, text).catch(err => {
         console.error(`❌ processMessage error [${phone}]:`, err);
       }));

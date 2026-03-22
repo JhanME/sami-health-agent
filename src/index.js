@@ -4,6 +4,7 @@ const express = require('express');
 const session = require('express-session');
 const kapsoWebhook = require('./webhooks/kapso');
 const adminRoutes = require('./routes/admin');
+const demoRoutes = require('./routes/demo');
 
 const app = express();
 
@@ -25,7 +26,18 @@ app.use('/webhook/kapso', kapsoWebhook);
 // Admin panel API
 app.use('/admin', adminRoutes);
 
+// Demo day registration (public, no auth)
+app.use('/demo', demoRoutes);
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 EvaCare+ running on port ${PORT}`);
+
+  const cron = require('node-cron');
+  const { triggerDailyFollowups } = require('./services/dailyFollowupService');
+
+  cron.schedule('*/15 * * * *', () => {
+    triggerDailyFollowups().catch(err => console.error('❌ Daily followup cron error:', err));
+  });
+  console.log('⏰ Daily followup cron scheduled (every 15 min)');
 });

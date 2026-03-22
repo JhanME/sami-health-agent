@@ -2,7 +2,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const pool = require('../db/pool');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const flash = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
+const flash = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
 /**
  * Classify risk level using Gemini Flash

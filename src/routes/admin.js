@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const router = express.Router();
 const pool = require('../db/pool');
 const { indexChunk } = require('../services/rag');
@@ -6,6 +7,11 @@ const { sendMessage } = require('../services/kapso');
 
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+
+// Serve admin panel at /admin
+router.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'admin.html'));
+});
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -312,6 +318,58 @@ router.get('/patients/:id/notes', async (req, res) => {
   }
 });
 
+// ── Evaluations ───────────────────────────────────────────────────────────────
+
+router.get('/patients/:id/evaluations', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM evaluation_results WHERE patient_id = $1 ORDER BY administered_at DESC`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Adherence ─────────────────────────────────────────────────────────────────
+
+router.get('/patients/:id/adherence', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM adherence_records WHERE patient_id = $1 ORDER BY reported_at DESC`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Conversation state (debug / admin reset) ───────────────────────────────────
+
+router.get('/patients/:id/state', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM conversation_states WHERE patient_id = $1`,
+      [req.params.id]
+    );
+    res.json(rows[0] || { flow: 'idle', step: 0, context: {} });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/patients/:id/state', async (req, res) => {
+  const { clearState } = require('../services/conversationState');
+  try {
+    await clearState(parseInt(req.params.id));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Global knowledge ──────────────────────────────────────────────────────────
 
 router.post('/knowledge/global', async (req, res) => {
@@ -340,6 +398,38 @@ router.get('/knowledge/global', async (req, res) => {
        WHERE patient_id IS NULL ORDER BY created_at DESC`
     );
     res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Trigger daily followup manually ──────────────────────────────────────────
+
+router.post('/patients/:id/daily-followup', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM patients WHERE id = $1', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Paciente no encontrado' });
+
+    const patient = rows[0];
+    const { getState, setState } = require('../services/conversationState');
+    const { sendMessage } = require('../services/kapso');
+
+    const state = await getState(patient.id);
+    if (state.flow !== 'idle') {
+      return res.status(409).json({ error: `Paciente en flujo activo: ${state.flow}` });
+    }
+
+    const name = patient.name?.split(' ')[0] || '';
+    const greeting = `Hola ${name} 👋 Quiero saber cómo estás hoy. Cuéntame, ¿cómo te has sentido?`;
+
+    await setState(patient.id, 'daily_followup', 0, { rawResponses: {} });
+    await sendMessage(patient.phone, greeting);
+    await pool.query(
+      `INSERT INTO messages (patient_id, role, content) VALUES ($1, 'assistant', $2)`,
+      [patient.id, greeting]
+    );
+
+    res.json({ success: true, message: 'Seguimiento diario iniciado' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -25,10 +25,10 @@ No test, lint, or build pipeline is currently configured.
 The project name is `sami-health` but the WhatsApp agent is named **Eva**. Eva is an oncology support companion. Messages flow through a multi-stage pipeline:
 
 ```
-WhatsApp → Kapso.ai webhook → Patient lookup → Forbidden-topic filter → Risk classifier → RAG retrieval → gemini-2.0-flash → Reply
+WhatsApp → Kapso.ai webhook (5s buffer) → Patient lookup → Forbidden-topic filter → Risk classifier → RAG retrieval → gemini-2.5-flash → Reply
 ```
 
-**`src/webhooks/kapso.js`** — Receives POST from Kapso.ai, responds 200 immediately to prevent retries. Maintains a per-patient in-memory queue (`Map<phone, Promise>`) to serialize concurrent messages from the same number. For each message: calls `markRead` + `sendTyping` (refreshed every 3s), then sends the reply split by `\n\n` as separate WhatsApp messages with 1-second delays between paragraphs. Only processes messages where `type === 'whatsapp.message.received'` and `message.type === 'text'`; all other message types (images, audio, etc.) are silently dropped. Kapso payload shape: `{ type, data: { conversation: { phone_number }, message: { id, type, text: { body } } } }`.
+**`src/webhooks/kapso.js`** — Receives POST from Kapso.ai, responds 200 immediately to prevent retries. Buffers rapid-fire messages per patient (5s debounce window) then concatenates them into a single text before processing. Maintains a per-patient in-memory queue (`Map<phone, Promise>`) to serialize concurrent messages from the same number. For each buffered batch: calls `markRead` on all messages + `sendTyping` (refreshed every 3s), then sends the reply split by `\n\n` as separate WhatsApp messages with 1-second delays between paragraphs. Only processes messages where `type === 'whatsapp.message.received'` and `message.type === 'text'`; all other message types (images, audio, etc.) are silently dropped. Kapso payload shape: `{ type, data: { conversation: { phone_number }, message: { id, type, text: { body } } } }`.
 
 **`src/agents/samiAgent.js`** — Core orchestration. `handleIncomingMessage()` runs the full pipeline:
 1. `getPatient(phone)` — looks up the patient by phone (normalizes to E.164); returns `INACTIVE_REPLY` if unregistered
@@ -36,18 +36,20 @@ WhatsApp → Kapso.ai webhook → Patient lookup → Forbidden-topic filter → 
 3. Steps 3–5 run in parallel via `Promise.all`: `isForbiddenTopic()`, `classifyRisk()`, `retrieveContext()`, `getHistory()`
 4. `isForbiddenTopic()` — detects dosage-change / prognosis questions; returns hardcoded redirect-to-doctor reply
 5. `classifyRisk()` — HIGH risk triggers hardcoded emergency response + `sendRiskReport()`; MODERATE saves alert and calls `sendRiskReport()` only if patient was previously at `expected` level (first escalation)
-6. Gemini chat call (`gemini-2.0-flash`) with `temperature: 0.2`, `maxOutputTokens: 8192`, RAG chunks + patient data in `systemInstruction`; last 10 messages as `history` (Gemini requires history to start with a `user` turn)
+6. Gemini chat call (`gemini-2.5-flash`) with `temperature: 0.2`, `maxOutputTokens: 8192`, RAG chunks + patient data in `systemInstruction`; last 10 messages as `history` (Gemini requires history to start with a `user` turn)
 7. Save both turns to `messages` table
 
 **`src/routes/admin.js`** — Session-authenticated REST API for the admin panel. Manages patients (CRUD, search by DNI), appointments, alerts, messages, doctor notes, and global knowledge chunks. When patient data or appointments change, knowledge chunks are automatically reindexed (delete + regenerate via `indexChunk`). Also exposes `POST /admin/patients/:id/activate` to send the first WhatsApp message manually.
 
 **`src/public/admin.html`** — Single-file admin UI served as a static asset.
 
-**`src/services/riskClassifier.js`** — Two separate Gemini Flash functions: `isForbiddenTopic()` (dosage/prognosis filter) and `classifyRisk()` (HIGH/MODERATE/EXPECTED). `saveAlert()` inserts into `alerts` and updates `patients.risk_level`. Both fall back safely on API error (`false`/`'expected'`). Uses `gemini-flash-latest`.
+**`src/routes/demo.js`** — Public (no auth) demo registration endpoint. `POST /demo/register` creates a patient with hardcoded clinical data (breast cancer scenario), generates appointments, indexes knowledge chunks, and leaves `activated_at = NULL` so Eva sends the welcome on first WhatsApp contact. Serves `src/public/demo.html` at `GET /demo`.
 
-**`src/services/psychReport.js`** — Called on HIGH risk (always) and MODERATE risk (only on first escalation). Fetches the last 5 alerts from the past 7 days, generates a 3-sentence clinical summary via `gemini-2.0-flash`, then sends the report via WhatsApp to all `emergency_contacts` + `oncologist_phone` on the patient record.
+**`src/services/riskClassifier.js`** — Two separate Gemini Flash functions: `isForbiddenTopic()` (dosage/prognosis filter) and `classifyRisk()` (HIGH/MODERATE/EXPECTED). `saveAlert()` inserts into `alerts` and updates `patients.risk_level`. Both fall back safely on API error (`false`/`'expected'`). Uses `gemini-2.5-flash`.
 
-**`src/services/rag.js`** — Uses Google `text-embedding-004` (768 dimensions) to embed queries and retrieve top-5 chunks via pgvector cosine distance (`<=>`). `indexChunk(content, source, patientId)` is the public API for loading knowledge; `patientId = null` means global.
+**`src/services/psychReport.js`** — Called on HIGH risk (always) and MODERATE risk (only on first escalation). Fetches the last 5 alerts from the past 7 days, generates a 3-sentence clinical summary via `gemini-2.5-flash`, then sends the report via WhatsApp to all `emergency_contacts` + `oncologist_phone` on the patient record.
+
+**`src/services/rag.js`** — Uses Google `gemini-embedding-001` (768 dimensions, configurable via `outputDimensionality`) to embed queries and retrieve top-5 chunks via pgvector cosine distance (`<=>`). `indexChunk(content, source, patientId)` is the public API for loading knowledge; `patientId = null` means global.
 
 **`src/services/kapso.js`** — Thin axios wrapper for the Kapso.ai REST API (`POST /v1/messages`).
 
@@ -75,7 +77,7 @@ Five tables defined in `migrate.js`:
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
-| `GEMINI_API_KEY` | `gemini-2.0-flash` (chat + psychReport) + `gemini-flash-latest` (risk/filter) + `text-embedding-004` (RAG) |
+| `GEMINI_API_KEY` | `gemini-2.5-flash` (chat + psychReport + risk/filter) + `gemini-embedding-001` (RAG) |
 | `KAPSO_API_KEY` | Outbound WhatsApp messages via Kapso.ai |
 | `KAPSO_WEBHOOK_SECRET` | Webhook signature verification (reserved) |
 | `SESSION_SECRET` | Express session secret for admin panel (default: `sami-admin-secret`) |
@@ -98,6 +100,6 @@ Then paste the generated URL into Kapso webhook settings.
 - All user-facing responses are in **Spanish**.
 - The system prompt enforces that Eva only answers from RAG-retrieved context — never from its own parametric knowledge about medical topics.
 - `temperature: 0.2` is intentional for clinical accuracy; do not raise it.
-- Both `isForbiddenTopic` and `classifyRisk` use `gemini-flash-latest` as a fast, cheap pre-filter before the main `gemini-2.0-flash` chat call — keep this two-model pattern.
+- All Gemini calls (chat, risk classifier, forbidden-topic filter, psychReport) use `gemini-2.5-flash`. RAG embeddings use `gemini-embedding-001`.
 - Steps 3–5 of the pipeline run via `Promise.all` — keep pre-filters concurrent.
 - The agent is deployed on **Railway**.
