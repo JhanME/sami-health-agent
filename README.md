@@ -2,7 +2,7 @@
 
 # amycare-health-agent
 
-**Sami is an intelligent conversational agent that accompanies oncology patients through their treatment journey — handling appointment booking, medication reminders, personalized nutrition plans, and emotional support, all through WhatsApp.**
+**Amy is an intelligent conversational agent that accompanies oncology patients through their treatment journey — handling appointment booking, medication reminders, personalized nutrition plans, and emotional support, all through WhatsApp.**
 
 [![Node.js](https://img.shields.io/badge/Node.js-22.x-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
 [![Express](https://img.shields.io/badge/Express-4.x-000000?style=flat-square&logo=express&logoColor=white)](https://expressjs.com)
