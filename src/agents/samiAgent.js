@@ -4,6 +4,12 @@ const pool = require('../db/pool');
 const { retrieveContext } = require('../services/rag');
 const { classifyRisk, isForbiddenTopic, saveAlert } = require('../services/riskClassifier');
 const { sendRiskReport } = require('../services/psychReport');
+const { getState, setState, clearState } = require('../services/conversationState');
+const { classifyMessageType } = require('../services/messageClassifier');
+const { startEmotionalFlow, advanceEmotionalFlow, startBreathing, advanceBreathing, start54321, advance54321 } = require('../services/emotionalFlow');
+const { getAdherenceCheckDue, startAdherenceCheck, advanceAdherenceCheck } = require('../services/adherenceService');
+const { getEvaluationDue, startEvaluation, advanceEvaluation } = require('../services/evaluationService');
+const { advanceDailyFollowup } = require('../services/dailyFollowupService');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -137,21 +143,30 @@ async function handleIncomingMessage(phone, userMessage) {
     return welcome;
   }
 
-  // 2-5. Run all independent pre-filters and data fetches in parallel
-  const [isForbidden, riskLevel, ragChunks, history] = await Promise.all([
+  // 3. Load current conversation state
+  const state = await getState(patient.id);
+
+  // 4. Run all independent pre-filters and data fetches in parallel
+  const [isForbidden, riskLevel, ragChunks, history, messageType, adherenceDue, evaluationDue] = await Promise.all([
     isForbiddenTopic(userMessage),
     classifyRisk(userMessage),
     retrieveContext(userMessage, patient.id),
     getHistory(patient.id),
+    classifyMessageType(userMessage, state),
+    getAdherenceCheckDue(patient),
+    getEvaluationDue(patient, state),
   ]);
 
-  if (isForbidden) {
+  // 5. Forbidden topic gate — skip during active flows (context is lost for the filter)
+  if (isForbidden && state.flow === 'idle') {
     await saveMessage(patient.id, 'user', userMessage);
     await saveMessage(patient.id, 'assistant', FORBIDDEN_REPLY);
     return FORBIDDEN_REPLY;
   }
 
+  // 6. HIGH risk gate — clear state + unchanged response
   if (riskLevel === 'high') {
+    await clearState(patient.id);
     await saveMessage(patient.id, 'user', userMessage);
     await saveMessage(patient.id, 'assistant', HIGH_RISK_REPLY);
     await saveAlert(patient.id, 'high', userMessage);
@@ -159,6 +174,7 @@ async function handleIncomingMessage(phone, userMessage) {
     return HIGH_RISK_REPLY;
   }
 
+  // 7. MODERATE risk gate — unchanged
   if (riskLevel === 'moderate') {
     const wasEscalation = patient.risk_level === 'expected';
     await saveAlert(patient.id, 'moderate', userMessage);
@@ -167,9 +183,43 @@ async function handleIncomingMessage(phone, userMessage) {
     }
   }
 
-  // 6. Call Gemini
+  // 8. Routing block
+  console.log(`🧭 [routing] flow=${state.flow} msgType=${messageType} adherence=${adherenceDue?.type ?? 'null'} eval=${evaluationDue ?? 'null'}`);
+  let reply = null;
+
+  if (state.flow === 'emotional_support') {
+    reply = await advanceEmotionalFlow(patient, userMessage, state);
+  } else if (state.flow === 'grounding_breathing') {
+    reply = await advanceBreathing(patient, userMessage, state);
+  } else if (state.flow === 'grounding_54321') {
+    reply = await advance54321(patient, userMessage, state);
+  } else if (state.flow === 'adherence_check') {
+    reply = await advanceAdherenceCheck(patient, userMessage, state);
+  } else if (state.flow === 'evaluation') {
+    reply = await advanceEvaluation(patient, userMessage, state);
+  } else if (state.flow === 'daily_followup') {
+    reply = await advanceDailyFollowup(patient, userMessage, state);
+    // If daily followup cleared state (e.g. substantial closing response),
+    // check if the message is emotional and start that flow
+    if (reply === null && messageType === 'emotional_expression') {
+      reply = await startEmotionalFlow(patient, userMessage);
+    }
+  } else if (messageType === 'emotional_expression') {
+    reply = await startEmotionalFlow(patient, userMessage);
+  }
+  // Adherencia y evaluación solo se disparan en modo híbrido (pregunta médica).
+  // En conversación casual o emocional no se interrumpe al paciente.
+
+  // If routing produced a reply, save and return
+  if (reply !== null) {
+    await saveMessage(patient.id, 'user', userMessage);
+    await saveMessage(patient.id, 'assistant', reply);
+    return reply;
+  }
+
+  // 9. Call Gemini
   const model = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-2.5-flash',
     systemInstruction: buildSystemPrompt(patient, ragChunks),
     generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
   });
@@ -187,13 +237,31 @@ async function handleIncomingMessage(phone, userMessage) {
 
   const result = await chat.sendMessage(userMessage);
   console.log('Gemini raw response:', JSON.stringify(result.response.candidates?.[0], null, 2));
-  const reply = result.response.text();
+  let geminiReply = result.response.text();
 
-  // 7. Save both messages
+  // Modo híbrido: pregunta médica + check pendiente → respuesta Gemini + append
+  // Skip if: (1) message has emotional weight (risk moderate+), (2) recently in emotional flow,
+  // or (3) the user message itself contains emotional language mixed with the question
+  const hasEmotionalWeight = riskLevel === 'moderate' ||
+    /triste|mal|llor|miedo|ansiedad|angustia|no puedo|agota|consume|dolor.*alma|no quiero|desespera/i.test(userMessage);
+  const recentEmotionalFlow = history.length >= 2 &&
+    history.slice(-6).some(m => m.role === 'assistant' && /ejercicio|respiración|5-4-3-2-1|línea.*emergencia|cómo te sientes|cuéntame más|te escucho/i.test(m.content));
+
+  if (messageType === 'informative_question' && state.flow === 'idle' && !recentEmotionalFlow && !hasEmotionalWeight) {
+    if (adherenceDue) {
+      const adherenceQuestion = await startAdherenceCheck(patient, adherenceDue.type, adherenceDue.appointmentId);
+      geminiReply = `${geminiReply}\n\n${adherenceQuestion}`;
+    } else if (evaluationDue) {
+      const evalStart = await startEvaluation(patient, evaluationDue);
+      geminiReply = `${geminiReply}\n\n${evalStart}`;
+    }
+  }
+
+  // 10. Save both messages
   await saveMessage(patient.id, 'user', userMessage);
-  await saveMessage(patient.id, 'assistant', reply);
+  await saveMessage(patient.id, 'assistant', geminiReply);
 
-  return reply;
+  return geminiReply;
 }
 
 module.exports = { handleIncomingMessage };

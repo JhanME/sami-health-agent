@@ -100,6 +100,74 @@ async function migrate() {
       ALTER TABLE patients ADD COLUMN IF NOT EXISTS oncologist_phone TEXT
     `);
 
+    // Add last_evaluation_at column for tracking evaluation cadence
+    await client.query(`
+      ALTER TABLE patients ADD COLUMN IF NOT EXISTS last_evaluation_at JSONB DEFAULT '{}'
+    `);
+
+    // Conversation state machine
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS conversation_states (
+        id         SERIAL PRIMARY KEY,
+        patient_id INT UNIQUE REFERENCES patients(id) ON DELETE CASCADE,
+        flow       TEXT NOT NULL DEFAULT 'idle',
+        step       INT NOT NULL DEFAULT 0,
+        context    JSONB DEFAULT '{}',
+        expires_at TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Psychological evaluation results (GAD-2, PHQ-2, TIPI, QoL)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS evaluation_results (
+        id                SERIAL PRIMARY KEY,
+        patient_id        INT REFERENCES patients(id) ON DELETE CASCADE,
+        type              TEXT NOT NULL,
+        answers           JSONB NOT NULL,
+        score             NUMERIC,
+        screened_positive BOOLEAN,
+        administered_at   TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Treatment adherence records
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS adherence_records (
+        id             SERIAL PRIMARY KEY,
+        patient_id     INT REFERENCES patients(id) ON DELETE CASCADE,
+        record_type    TEXT NOT NULL,
+        appointment_id INT REFERENCES appointments(id) ON DELETE SET NULL,
+        reported_at    TIMESTAMP DEFAULT NOW(),
+        data           JSONB DEFAULT '{}',
+        status         TEXT DEFAULT 'green'
+      )
+    `);
+
+    // Daily check-in records
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS daily_checkins (
+        id              SERIAL PRIMARY KEY,
+        patient_id      INT REFERENCES patients(id) ON DELETE CASCADE,
+        general_score   INT,
+        symptoms        JSONB DEFAULT '[]',
+        medication_taken BOOLEAN,
+        raw_responses   JSONB DEFAULT '{}',
+        alert_flag      BOOLEAN DEFAULT FALSE,
+        completed       BOOLEAN DEFAULT FALSE,
+        initiated_at    TIMESTAMP DEFAULT NOW(),
+        completed_at    TIMESTAMP
+      )
+    `);
+
+    // Daily followup scheduling columns
+    await client.query(`
+      ALTER TABLE patients ADD COLUMN IF NOT EXISTS followup_hour INT DEFAULT 9
+    `);
+    await client.query(`
+      ALTER TABLE patients ADD COLUMN IF NOT EXISTS last_followup_at DATE
+    `);
+
     await client.query('COMMIT');
     console.log('✅ Migrations applied successfully');
   } catch (err) {
