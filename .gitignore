@@ -7,4 +7,8 @@ dist/
 
 #Cluade
 .claude/
-CLAUDE.mdS
+CLAUDE.md
+.kiro 
+.agent
+.agent
+remotion-video/
